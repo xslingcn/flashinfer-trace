@@ -5,14 +5,14 @@ import torch
 
 
 @torch.no_grad()
-def run(q, k, v, qo_indptr, kv_indptr, sm_scale):
-    total_q, num_attention_heads, head_dim = q.shape
-    total_kv, num_key_value_heads, _ = k.shape
+def run(q, k, v, qo_indptr, kv_indptr, sm_scale, causal):
+    total_q, num_qo_heads, head_dim = q.shape
+    total_kv, num_kv_heads, _ = k.shape
     num_indptr = qo_indptr.shape[0]
 
     # Check constants
-    assert num_attention_heads == 32
-    assert num_key_value_heads == 8
+    assert num_qo_heads == 32
+    assert num_kv_heads == 8
     assert head_dim == 128
 
     # Check constraints
@@ -22,13 +22,13 @@ def run(q, k, v, qo_indptr, kv_indptr, sm_scale):
     device = q.device
 
     output = torch.zeros(
-        (total_q, num_attention_heads, head_dim), dtype=torch.bfloat16, device=device
+        (total_q, num_qo_heads, head_dim), dtype=torch.bfloat16, device=device
     )
     lse = torch.full(
-        (total_q, num_attention_heads), -float("inf"), dtype=torch.float32, device=device
+        (total_q, num_qo_heads), -float("inf"), dtype=torch.float32, device=device
     )
 
-    gqa_ratio = num_attention_heads // num_key_value_heads
+    gqa_ratio = num_qo_heads // num_kv_heads
 
     q_f32 = q.to(torch.float32)
     k_f32 = k.to(torch.float32)
@@ -46,9 +46,9 @@ def run(q, k, v, qo_indptr, kv_indptr, sm_scale):
             continue
 
         # Get Q, K, V for this batch
-        q_batch = q_f32[q_start:q_end]  # [num_q_tokens, num_attention_heads, head_dim]
-        k_batch = k_f32[kv_start:kv_end]  # [num_kv_tokens, num_key_value_heads, head_dim]
-        v_batch = v_f32[kv_start:kv_end]  # [num_kv_tokens, num_key_value_heads, head_dim]
+        q_batch = q_f32[q_start:q_end]  # [num_q_tokens, num_qo_heads, head_dim]
+        k_batch = k_f32[kv_start:kv_end]  # [num_kv_tokens, num_kv_heads, head_dim]
+        v_batch = v_f32[kv_start:kv_end]  # [num_kv_tokens, num_kv_heads, head_dim]
 
         num_q_tokens = q_batch.shape[0]
         num_kv_tokens = k_batch.shape[0]
@@ -57,15 +57,18 @@ def run(q, k, v, qo_indptr, kv_indptr, sm_scale):
         for q_idx in range(num_q_tokens):
             global_q_idx = q_start + q_idx
 
-            # Causal attention mask
-            max_kv_idx = min(q_idx + 1 + delta, num_kv_tokens)
+            # Apply causal mask if enabled, otherwise attend to all KV tokens
+            if causal:
+                max_kv_idx = min(q_idx + 1 + delta, num_kv_tokens)
+            else:
+                max_kv_idx = num_kv_tokens
 
             if max_kv_idx <= 0:
                 continue
 
-            q_pos = q_batch[q_idx]  # [num_attention_heads, head_dim]
+            q_pos = q_batch[q_idx]  # [num_qo_heads, head_dim]
 
-            for h in range(num_attention_heads):
+            for h in range(num_qo_heads):
                 # Find corresponding KV head for GQA
                 kv_head = h // gqa_ratio
 
@@ -93,6 +96,7 @@ def generate_random_inputs(
     num_attention_heads=32,
     num_key_value_heads=8,
     head_dim=128,
+    causal=True,
     device="cuda",
 ):
     """Generate random inputs for ragged prefill testing."""
@@ -126,6 +130,9 @@ def generate_random_inputs(
     # Generate attention parameters
     sm_scale = 1.0 / math.sqrt(head_dim)
     sm_scale = torch.tensor(sm_scale, dtype=torch.float32, device=device)
+    
+    # Convert causal to tensor
+    causal = torch.tensor(causal, dtype=torch.bool, device=device)
 
     return {
         "q": q,
@@ -138,14 +145,15 @@ def generate_random_inputs(
         "total_q": total_q,
         "total_kv": total_kv,
         "sm_scale": sm_scale,
+        "causal": causal,
     }
 
 
-def test_correctness(batch_size=4, max_q_len=32, max_kv_len=64, atol=1e-2, rtol=5e-2):
+def test_correctness(batch_size=4, max_q_len=32, max_kv_len=64, causal=True, atol=1e-2, rtol=5e-2):
     """Test correctness of ragged prefill reference implementation against FlashInfer."""
     print(f"\n{'='*60}")
     print(
-        f"Testing GQA Ragged Prefill batch_size={batch_size}, max_q_len={max_q_len}, max_kv_len={max_kv_len}"
+        f"Testing GQA Ragged Prefill batch_size={batch_size}, max_q_len={max_q_len}, max_kv_len={max_kv_len}, causal={causal}"
     )
     print(f"{'='*60}")
 
@@ -167,6 +175,7 @@ def test_correctness(batch_size=4, max_q_len=32, max_kv_len=64, atol=1e-2, rtol=
         num_attention_heads,
         num_key_value_heads,
         head_dim,
+        causal,
         device,
     )
 
@@ -174,6 +183,7 @@ def test_correctness(batch_size=4, max_q_len=32, max_kv_len=64, atol=1e-2, rtol=
     print(f"Generated KV lengths: {inputs['kv_lens'].cpu().numpy()}")
     print(f"Total query tokens: {inputs['total_q']}")
     print(f"Total KV tokens: {inputs['total_kv']}")
+    print(f"Causal mode: {inputs['causal'].item()}")
 
     # Run reference implementation
     print("\nRunning reference implementation...")
@@ -184,6 +194,7 @@ def test_correctness(batch_size=4, max_q_len=32, max_kv_len=64, atol=1e-2, rtol=
         inputs["qo_indptr"],
         inputs["kv_indptr"],
         inputs["sm_scale"],
+        inputs["causal"],
     )
     ref_o = ref_output["output"]
     ref_lse = ref_output["lse"]
@@ -204,7 +215,7 @@ def test_correctness(batch_size=4, max_q_len=32, max_kv_len=64, atol=1e-2, rtol=
         num_kv_heads=num_key_value_heads,
         head_dim_qk=head_dim,  # head dimension for query/key
         head_dim_vo=head_dim,  # head dimension for value/output (same as qk for standard attention)
-        causal=True,  # Use causal attention for prefill
+        causal=inputs["causal"].item(),  # Use the randomly generated causal flag
         sm_scale=inputs["sm_scale"],  # Scale factor for softmax
         q_data_type=torch.bfloat16,
         kv_data_type=torch.bfloat16,
@@ -320,20 +331,25 @@ def main():
 
     # Test different configurations
     test_configs = [
-        # (batch_size, max_q_len, max_kv_len)
-        (1, 8, 16),  # Single batch, small
-        (4, 16, 32),  # Small batch
-        (8, 32, 64),  # Medium batch
-        (16, 64, 128),  # Large batch
-        (32, 128, 256),  # Very large batch
+        # (batch_size, max_q_len, max_kv_len, causal)
+        (1, 8, 16, True),  # Single batch, small, causal
+        (1, 8, 16, False),  # Single batch, small, non-causal
+        (4, 16, 32, True),  # Small batch, causal
+        (4, 16, 32, False),  # Small batch, non-causal
+        (8, 32, 64, True),  # Medium batch, causal
+        (8, 32, 64, False),  # Medium batch, non-causal
+        (16, 64, 128, True),  # Large batch, causal
+        (16, 64, 128, False),  # Large batch, non-causal
+        (32, 128, 256, True),  # Very large batch, causal
+        (32, 128, 256, False),  # Very large batch, non-causal
     ]
 
     passed = 0
     total = len(test_configs)
 
-    for batch_size, max_q_len, max_kv_len in test_configs:
+    for batch_size, max_q_len, max_kv_len, causal in test_configs:
         try:
-            if test_correctness(batch_size, max_q_len, max_kv_len):
+            if test_correctness(batch_size, max_q_len, max_kv_len, causal):
                 passed += 1
         except Exception as e:
             print(f"✗ Test failed with exception: {str(e)}")
