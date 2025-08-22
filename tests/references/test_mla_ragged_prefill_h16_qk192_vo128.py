@@ -5,11 +5,10 @@ import torch
 
 
 @torch.no_grad()
-def run(q, k, v, qo_indptr, kv_indptr, sm_scale, causal):
-    total_q, num_qo_heads, head_dim_qk = q.shape
-    total_kv = k.shape[0]
+def run(q, k, v, seq_indptr, sm_scale, causal):
+    total_tokens, num_qo_heads, head_dim_qk = q.shape
     head_dim_vo = v.shape[-1]
-    num_indptr = qo_indptr.shape[0]
+    len_indptr = seq_indptr.shape[0]
 
     # Check constants
     assert num_qo_heads == 16
@@ -17,78 +16,70 @@ def run(q, k, v, qo_indptr, kv_indptr, sm_scale, causal):
     assert head_dim_vo == 128
 
     # Check constraints
-    assert total_q == qo_indptr[-1].item()
-    assert total_kv == kv_indptr[-1].item()
-    assert total_q == total_kv
+    assert total_tokens == seq_indptr[-1].item()
 
     device = q.device
 
-    out = torch.zeros((total_q, num_qo_heads, head_dim_vo), dtype=torch.bfloat16, device=device)
-    lse = torch.full((total_q, num_qo_heads), -float("inf"), dtype=torch.float32, device=device)
+    out = torch.zeros((total_tokens, num_qo_heads, head_dim_vo), dtype=torch.bfloat16, device=device)
+    lse = torch.full((total_tokens, num_qo_heads), -float("inf"), dtype=torch.float32, device=device)
 
     q = q.to(torch.float32)
     k = k.to(torch.float32)
     v = v.to(torch.float32)
 
-    for b in range(num_indptr - 1):
-        q0, q1 = int(qo_indptr[b].item()), int(qo_indptr[b + 1].item())
-        k0, k1 = int(kv_indptr[b].item()), int(kv_indptr[b + 1].item())
-        if q0 >= q1 or k0 >= k1:
+    for b in range(len_indptr - 1):
+        seq_start = int(seq_indptr[b].item())
+        seq_end = int(seq_indptr[b + 1].item())
+        if seq_start >= seq_end:
             continue
 
-        qb = q[q0:q1]  # [q_len, num_qo_heads, head_dim_qk]
-        kb = k[k0:k1]  # [kv_len, num_kv_heads, head_dim_qk]
-        vb = v[k0:k1]  # [kv_len, num_kv_heads, head_dim_vo]
-        q_len = qb.shape[0]
-        kv_len = kb.shape[0]
+        seq_len = seq_end - seq_start
+        qb = q[seq_start:seq_end]  # [seq_len, num_qo_heads, head_dim_qk]
+        kb = k[seq_start:seq_end]  # [seq_len, num_qo_heads, head_dim_qk]
+        vb = v[seq_start:seq_end]  # [seq_len, num_qo_heads, head_dim_vo]
 
-        logits = torch.einsum("qhd,khd->qhk", qb, kb)  # [q_len, num_qo_heads, kv_len]
+        logits = torch.einsum("qhd,khd->qhk", qb, kb)  # [seq_len, num_qo_heads, seq_len]
         logits_scaled = logits * sm_scale
 
         # Apply causal mask if enabled
         if causal:
-            i = torch.arange(q_len, device=device).unsqueeze(-1)  # [q_len, 1]
-            j = torch.arange(kv_len, device=device).unsqueeze(0)  # [1, kv_len]
+            i = torch.arange(seq_len, device=device).unsqueeze(-1)  # [seq_len, 1]
+            j = torch.arange(seq_len, device=device).unsqueeze(0)  # [1, seq_len]
             logits_scaled.masked_fill_((j > i).unsqueeze(1), float("-inf"))
 
         # Compute 2-base LSE
-        lse[q0:q1] = torch.logsumexp(logits_scaled, dim=-1) / math.log(2.0)
+        lse[seq_start:seq_end] = torch.logsumexp(logits_scaled, dim=-1) / math.log(2.0)
 
-        attn = torch.softmax(logits_scaled, dim=-1)  # [q_len, num_qo_heads, kv_len]
-        out_b = torch.einsum("qhk,khd->qhd", attn, vb)  # [q_len, num_qo_heads, head_dim_vo]
-        out[q0:q1] = out_b.to(torch.bfloat16)
+        attn = torch.softmax(logits_scaled, dim=-1)  # [seq_len, num_qo_heads, seq_len]
+        out_b = torch.einsum("qhk,khd->qhd", attn, vb)  # [seq_len, num_qo_heads, head_dim_vo]
+        out[seq_start:seq_end] = out_b.to(torch.bfloat16)
 
     return {"output": out, "lse": lse}
 
 
 def generate_random_inputs(
     batch_size,
-    max_q_len,
-    max_kv_len,
+    max_seq_len,
     num_heads=16,
     head_dim_qk=192,
     head_dim_vo=128,
     causal=True,
     device="cuda",
 ):
-    max_len = int(min(max_q_len, max_kv_len))
-    q_lens = torch.randint(1, max_len + 1, (batch_size,), dtype=torch.int32)
+    # Generate random sequence lengths for each batch
+    seq_lens = torch.randint(1, max_seq_len + 1, (batch_size,), dtype=torch.int32)
 
-    kv_lens = q_lens.clone()
+    # Since MLA is self-attention, all indptrs are the same
+    seq_indptr = torch.zeros(batch_size + 1, dtype=torch.int32)
+    seq_indptr[1:] = torch.cumsum(seq_lens, dim=0)
+    seq_indptr = seq_indptr.to(device)
 
-    qo_indptr = torch.zeros(batch_size + 1, dtype=torch.int32)
-    qo_indptr[1:] = torch.cumsum(q_lens, dim=0)
-    kv_indptr = qo_indptr.clone()
+    total_tokens = int(seq_indptr[-1].item())
 
-    qo_indptr = qo_indptr.to(device)
-    kv_indptr = kv_indptr.to(device)
-
-    total_q = int(qo_indptr[-1].item())
-    total_kv = int(kv_indptr[-1].item())
-
-    q = torch.randn(total_q, num_heads, head_dim_qk, dtype=torch.bfloat16, device=device)
-    k = torch.randn(total_kv, num_heads, head_dim_qk, dtype=torch.bfloat16, device=device)
-    v = torch.randn(total_kv, num_heads, head_dim_vo, dtype=torch.bfloat16, device=device)
+    # Generate Q, K, V tensors with same token count
+    q = torch.randn(total_tokens, num_heads, head_dim_qk, dtype=torch.bfloat16, device=device)
+    k = torch.randn(total_tokens, num_heads, head_dim_qk, dtype=torch.bfloat16, device=device)
+    v = torch.randn(total_tokens, num_heads, head_dim_vo, dtype=torch.bfloat16, device=device)
 
     sm_scale = 1.0 / math.sqrt(head_dim_qk)
     sm_scale = torch.tensor(sm_scale, dtype=torch.float32, device=device)
@@ -100,12 +91,9 @@ def generate_random_inputs(
         "q": q,
         "k": k,
         "v": v,
-        "qo_indptr": qo_indptr,
-        "kv_indptr": kv_indptr,
-        "q_lens": q_lens,
-        "kv_lens": kv_lens,
-        "total_q": total_q,
-        "total_kv": total_kv,
+        "seq_indptr": seq_indptr,
+        "seq_lens": seq_lens,
+        "total_tokens": total_tokens,
         "sm_scale": sm_scale,
         "causal": causal,
         "num_heads": num_heads,
@@ -115,11 +103,11 @@ def generate_random_inputs(
     }
 
 
-def test_correctness(batch_size=4, max_q_len=32, max_kv_len=64, causal=True, atol=1e-2, rtol=5e-2):
+def test_correctness(batch_size=4, max_seq_len=32, causal=True, atol=1e-2, rtol=5e-2):
     print(f"\n{'='*60}")
     print(
-        f"Testing MLA Ragged Prefill (no absorption) "
-        f"bs={batch_size}, max_q={max_q_len}, max_kv={max_kv_len}, causal={causal}"
+        f"Testing MLA Ragged Prefill "
+        f"bs={batch_size}, max_seq_len={max_seq_len}, causal={causal}"
     )
     print(f"{'='*60}")
 
@@ -132,10 +120,9 @@ def test_correctness(batch_size=4, max_q_len=32, max_kv_len=64, causal=True, ato
     Dqk = 192
     Dvo = 128
 
-    inputs = generate_random_inputs(batch_size, max_q_len, max_kv_len, H, Dqk, Dvo, causal, device)
-    print(f"q_lens: {inputs['q_lens'].cpu().numpy()}")
-    print(f"kv_lens:{inputs['kv_lens'].cpu().numpy()}")
-    print(f"total_q={inputs['total_q']}, total_kv={inputs['total_kv']}")
+    inputs = generate_random_inputs(batch_size, max_seq_len, H, Dqk, Dvo, causal, device)
+    print(f"seq_lens: {inputs['seq_lens'].cpu().numpy()}")
+    print(f"total_tokens={inputs['total_tokens']}")
     print(f"causal={inputs['causal'].item()}")
 
     print("\nRunning reference...")
@@ -143,8 +130,7 @@ def test_correctness(batch_size=4, max_q_len=32, max_kv_len=64, causal=True, ato
         inputs["q"],
         inputs["k"],
         inputs["v"],
-        inputs["qo_indptr"],
-        inputs["kv_indptr"],
+        inputs["seq_indptr"],
         inputs["sm_scale"],
         inputs["causal"],
     )
@@ -156,9 +142,10 @@ def test_correctness(batch_size=4, max_q_len=32, max_kv_len=64, causal=True, ato
     prefill = flashinfer.prefill.BatchPrefillWithRaggedKVCacheWrapper(
         workspace_buffer, kv_layout="NHD"
     )
+    # For MLA self-attention, qo_indptr and kv_indptr are identical
     prefill.plan(
-        inputs["qo_indptr"],
-        inputs["kv_indptr"],
+        inputs["seq_indptr"],
+        inputs["seq_indptr"],
         num_qo_heads=H,
         num_kv_heads=H,
         head_dim_qk=Dqk,
@@ -245,22 +232,22 @@ def test_correctness(batch_size=4, max_q_len=32, max_kv_len=64, causal=True, ato
 
 
 def main():
-    print("Testing MLA Ragged Prefill (no absorption) with FlashInfer")
+    print("Testing MLA Ragged Prefill with FlashInfer")
     test_cfgs = [
-        # (batch_size, max_q_len, max_kv_len, causal)
-        (1, 8, 16, True),   # Small, causal
-        (1, 8, 16, False),  # Small, non-causal
-        (4, 16, 32, True),  # Medium, causal
-        (4, 16, 32, False), # Medium, non-causal
-        (8, 32, 64, True),  # Large, causal
-        (8, 32, 64, False), # Large, non-causal
-        (16, 64, 128, True),  # Very large, causal
-        (16, 64, 128, False), # Very large, non-causal
+        # (batch_size, max_seq_len, causal)
+        (1, 16, True),   # Small, causal
+        (1, 16, False),  # Small, non-causal
+        (4, 32, True),   # Medium, causal
+        (4, 32, False),  # Medium, non-causal
+        (8, 64, True),   # Large, causal
+        (8, 64, False),  # Large, non-causal
+        (16, 128, True),  # Very large, causal
+        (16, 128, False), # Very large, non-causal
     ]
     passed = 0
-    for bs, mq, mkv, causal in test_cfgs:
+    for bs, max_seq, causal in test_cfgs:
         try:
-            if test_correctness(bs, mq, mkv, causal):
+            if test_correctness(bs, max_seq, causal):
                 passed += 1
         except Exception as e:
             print(f"✗ Exception: {e}")
