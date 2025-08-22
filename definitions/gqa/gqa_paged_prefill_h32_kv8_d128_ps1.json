@@ -34,7 +34,7 @@
     },
     "num_kv_indices": {
       "type": "var",
-      "description": "Total number of page indices."
+      "description": "Total number of KV page indices."
     },
     "num_pages": {
       "type": "var"
@@ -95,7 +95,7 @@
     "sm_scale": {
       "shape": [],
       "dtype": "float32",
-      "description": "Softmax scale. Default should be (1/sqrt(head_dim))."
+      "description": "Softmax scale. Default is (1/sqrt(head_dim))."
     },
     "causal": {
       "shape": [],

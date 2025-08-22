@@ -79,7 +79,7 @@
     "sm_scale": {
       "shape": [],
       "dtype": "float32",
-      "description": "Softmax scale. Default should be (1/sqrt(head_dim))."
+      "description": "Softmax scale. Default is (1/sqrt(head_dim))."
     },
     "causal": {
       "shape": [],

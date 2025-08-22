@@ -10,7 +10,7 @@ def run(q_nope, q_pe, ckv_cache, kpe_cache, kv_indptr, kv_indices, sm_scale):
     batch_size, num_qo_heads, head_dim_ckv = q_nope.shape
     head_dim_kpe = q_pe.shape[-1]
     page_size = ckv_cache.shape[1]
-    len_kv_indptr = kv_indptr.shape[0]
+    len_indptr = kv_indptr.shape[0]
     num_kv_indices = kv_indices.shape[0]
 
     # Check constants
@@ -20,7 +20,7 @@ def run(q_nope, q_pe, ckv_cache, kpe_cache, kv_indptr, kv_indices, sm_scale):
     assert page_size == 1
 
     # Check constraints
-    assert len_kv_indptr == batch_size + 1
+    assert len_indptr == batch_size + 1
     assert num_kv_indices == kv_indptr[-1].item()
 
     device = q_nope.device

@@ -7,38 +7,38 @@ import torch
 
 @torch.no_grad()
 def run(q, k_cache, v_cache, kv_indptr, kv_indices, sm_scale):
-    batch_size, num_attention_heads, head_dim = q.shape
-    _, page_size, num_key_value_heads, _ = k_cache.shape
-    num_kv_indptr = kv_indptr.shape[0]
+    batch_size, num_qo_heads, head_dim = q.shape
+    _, page_size, num_kv_heads, _ = k_cache.shape
+    len_indptr = kv_indptr.shape[0]
     num_kv_indices = kv_indices.shape[0]
 
     # Check constants
-    assert num_attention_heads == 32
-    assert num_key_value_heads == 8
+    assert num_qo_heads == 32
+    assert num_kv_heads == 8
     assert head_dim == 128
     assert page_size == 1
 
     # Check constraints
-    assert num_kv_indptr == batch_size + 1
+    assert len_indptr == batch_size + 1
     assert num_kv_indices == kv_indptr[-1].item()
 
     device = q.device
 
     output = torch.zeros(
-        (batch_size, num_attention_heads, head_dim), dtype=torch.bfloat16, device=device
+        (batch_size, num_qo_heads, head_dim), dtype=torch.bfloat16, device=device
     )
     lse = torch.full(
-        (batch_size, num_attention_heads), -float("inf"), dtype=torch.float32, device=device
+        (batch_size, num_qo_heads), -float("inf"), dtype=torch.float32, device=device
     )
 
-    gqa_ratio = num_attention_heads // num_key_value_heads
+    gqa_ratio = num_qo_heads // num_kv_heads
 
     k_cache_flat = k_cache.squeeze(1).to(
         torch.float32
-    )  # [num_pages, num_key_value_heads, head_dim]
+    )  # [num_pages, num_kv_heads, head_dim]
     v_cache_flat = v_cache.squeeze(1).to(
         torch.float32
-    )  # [num_pages, num_key_value_heads, head_dim]
+    )  # [num_pages, num_kv_heads, head_dim]
 
     for b in range(batch_size):
         page_start = int(kv_indptr[b].item())
@@ -59,11 +59,11 @@ def run(q, k_cache, v_cache, kv_indptr, kv_indices, sm_scale):
             continue
 
         # Get Q, K, V for this batch
-        k_batch = k_cache_flat[token_indices]  # [num_tokens, num_key_value_heads, head_dim]
-        v_batch = v_cache_flat[token_indices]  # [num_tokens, num_key_value_heads, head_dim]
-        q_batch = q[b].to(torch.float32)  # [num_attention_heads, head_dim]
+        k_batch = k_cache_flat[token_indices]  # [num_tokens, num_kv_heads, head_dim]
+        v_batch = v_cache_flat[token_indices]  # [num_tokens, num_kv_heads, head_dim]
+        q_batch = q[b].to(torch.float32)  # [num_qo_heads, head_dim]
 
-        for h in range(num_attention_heads):
+        for h in range(num_qo_heads):
             # Find corresponding KV head for GQA
             kv_head = h // gqa_ratio
 
