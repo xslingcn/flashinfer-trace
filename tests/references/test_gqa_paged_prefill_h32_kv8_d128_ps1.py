@@ -8,7 +8,7 @@ import torch
 def run(q, k_cache, v_cache, qo_indptr, kv_indptr, kv_indices, sm_scale, causal):
     total_q, num_qo_heads, head_dim = q.shape
     num_pages, page_size, num_kv_heads, _ = k_cache.shape
-    num_indptr = qo_indptr.shape[0]
+    len_indptr = qo_indptr.shape[0]
     num_kv_indices = kv_indices.shape[0]
 
     # Check constants
@@ -37,7 +37,7 @@ def run(q, k_cache, v_cache, qo_indptr, kv_indptr, kv_indices, sm_scale, causal)
     k_cache_flat = k_cache.squeeze(1).to(torch.float32)  # [num_pages, num_kv_heads, head_dim]
     v_cache_flat = v_cache.squeeze(1).to(torch.float32)  # [num_pages, num_kv_heads, head_dim]
 
-    for b in range(num_indptr - 1):
+    for b in range(len_indptr - 1):
         q_start = int(qo_indptr[b].item())
         q_end = int(qo_indptr[b + 1].item())
 

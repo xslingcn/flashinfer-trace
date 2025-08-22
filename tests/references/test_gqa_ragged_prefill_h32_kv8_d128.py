@@ -8,7 +8,7 @@ import torch
 def run(q, k, v, qo_indptr, kv_indptr, sm_scale, causal):
     total_q, num_qo_heads, head_dim = q.shape
     total_kv, num_kv_heads, _ = k.shape
-    num_indptr = qo_indptr.shape[0]
+    len_indptr = qo_indptr.shape[0]
 
     # Check constants
     assert num_qo_heads == 32
@@ -34,7 +34,7 @@ def run(q, k, v, qo_indptr, kv_indptr, sm_scale, causal):
     k_f32 = k.to(torch.float32)
     v_f32 = v.to(torch.float32)
 
-    for b in range(num_indptr - 1):
+    for b in range(len_indptr - 1):
         q_start = int(qo_indptr[b].item())
         q_end = int(qo_indptr[b + 1].item())
 
