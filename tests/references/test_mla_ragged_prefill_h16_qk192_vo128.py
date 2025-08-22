@@ -5,7 +5,7 @@ import torch
 
 
 @torch.no_grad()
-def run(q, k, v, qo_indptr, kv_indptr, sm_scale):
+def run(q, k, v, qo_indptr, kv_indptr, sm_scale, causal):
     total_q, num_qo_heads, head_dim_qk = q.shape
     total_kv = k.shape[0]
     head_dim_vo = v.shape[-1]
@@ -45,10 +45,11 @@ def run(q, k, v, qo_indptr, kv_indptr, sm_scale):
         logits = torch.einsum("qhd,khd->qhk", qb, kb)  # [q_len, num_qo_heads, kv_len]
         logits_scaled = logits * sm_scale
 
-        # Causal mask, no need to allow offset because indptrs should be identical
-        i = torch.arange(q_len, device=device).unsqueeze(-1)  # [q_len, 1]
-        j = torch.arange(kv_len, device=device).unsqueeze(0)  # [1, kv_len]
-        logits_scaled.masked_fill_((j > i).unsqueeze(1), float("-inf"))
+        # Apply causal mask if enabled
+        if causal:
+            i = torch.arange(q_len, device=device).unsqueeze(-1)  # [q_len, 1]
+            j = torch.arange(kv_len, device=device).unsqueeze(0)  # [1, kv_len]
+            logits_scaled.masked_fill_((j > i).unsqueeze(1), float("-inf"))
 
         # Compute 2-base LSE
         lse[q0:q1] = torch.logsumexp(logits_scaled, dim=-1) / math.log(2.0)
@@ -67,6 +68,7 @@ def generate_random_inputs(
     num_heads=16,
     head_dim_qk=192,
     head_dim_vo=128,
+    causal=True,
     device="cuda",
 ):
     max_len = int(min(max_q_len, max_kv_len))
@@ -89,6 +91,10 @@ def generate_random_inputs(
     v = torch.randn(total_kv, num_heads, head_dim_vo, dtype=torch.bfloat16, device=device)
 
     sm_scale = 1.0 / math.sqrt(head_dim_qk)
+    sm_scale = torch.tensor(sm_scale, dtype=torch.float32, device=device)
+    
+    # Convert causal to tensor
+    causal = torch.tensor(causal, dtype=torch.bool, device=device)
 
     return {
         "q": q,
@@ -101,6 +107,7 @@ def generate_random_inputs(
         "total_q": total_q,
         "total_kv": total_kv,
         "sm_scale": sm_scale,
+        "causal": causal,
         "num_heads": num_heads,
         "head_dim_qk": head_dim_qk,
         "head_dim_vo": head_dim_vo,
@@ -108,11 +115,11 @@ def generate_random_inputs(
     }
 
 
-def test_correctness(batch_size=4, max_q_len=32, max_kv_len=64, atol=1e-2, rtol=5e-2):
+def test_correctness(batch_size=4, max_q_len=32, max_kv_len=64, causal=True, atol=1e-2, rtol=5e-2):
     print(f"\n{'='*60}")
     print(
         f"Testing MLA Ragged Prefill (no absorption) "
-        f"bs={batch_size}, max_q={max_q_len}, max_kv={max_kv_len}"
+        f"bs={batch_size}, max_q={max_q_len}, max_kv={max_kv_len}, causal={causal}"
     )
     print(f"{'='*60}")
 
@@ -125,10 +132,11 @@ def test_correctness(batch_size=4, max_q_len=32, max_kv_len=64, atol=1e-2, rtol=
     Dqk = 192
     Dvo = 128
 
-    inputs = generate_random_inputs(batch_size, max_q_len, max_kv_len, H, Dqk, Dvo, device)
+    inputs = generate_random_inputs(batch_size, max_q_len, max_kv_len, H, Dqk, Dvo, causal, device)
     print(f"q_lens: {inputs['q_lens'].cpu().numpy()}")
     print(f"kv_lens:{inputs['kv_lens'].cpu().numpy()}")
     print(f"total_q={inputs['total_q']}, total_kv={inputs['total_kv']}")
+    print(f"causal={inputs['causal'].item()}")
 
     print("\nRunning reference...")
     ref = run(
@@ -138,6 +146,7 @@ def test_correctness(batch_size=4, max_q_len=32, max_kv_len=64, atol=1e-2, rtol=
         inputs["qo_indptr"],
         inputs["kv_indptr"],
         inputs["sm_scale"],
+        inputs["causal"],
     )
     ref_o = ref["output"]
     ref_lse = ref["lse"]
@@ -154,7 +163,7 @@ def test_correctness(batch_size=4, max_q_len=32, max_kv_len=64, atol=1e-2, rtol=
         num_kv_heads=H,
         head_dim_qk=Dqk,
         head_dim_vo=Dvo,
-        causal=True,
+        causal=inputs["causal"].item(),
         sm_scale=inputs["sm_scale"],
         q_data_type=torch.bfloat16,
         kv_data_type=torch.bfloat16,
@@ -238,16 +247,20 @@ def test_correctness(batch_size=4, max_q_len=32, max_kv_len=64, atol=1e-2, rtol=
 def main():
     print("Testing MLA Ragged Prefill (no absorption) with FlashInfer")
     test_cfgs = [
-        (1, 8, 16),
-        (4, 16, 32),
-        (8, 32, 64),
-        (16, 64, 128),
-        (32, 128, 256),
+        # (batch_size, max_q_len, max_kv_len, causal)
+        (1, 8, 16, True),   # Small, causal
+        (1, 8, 16, False),  # Small, non-causal
+        (4, 16, 32, True),  # Medium, causal
+        (4, 16, 32, False), # Medium, non-causal
+        (8, 32, 64, True),  # Large, causal
+        (8, 32, 64, False), # Large, non-causal
+        (16, 64, 128, True),  # Very large, causal
+        (16, 64, 128, False), # Very large, non-causal
     ]
     passed = 0
-    for bs, mq, mkv in test_cfgs:
+    for bs, mq, mkv, causal in test_cfgs:
         try:
-            if test_correctness(bs, mq, mkv):
+            if test_correctness(bs, mq, mkv, causal):
                 passed += 1
         except Exception as e:
             print(f"✗ Exception: {e}")
