@@ -1,6 +1,6 @@
 {
   "name": "gqa_ragged_prefill_h32_kv8_d128",
-  "description": "Batch Grouped Query Attention (GQA) with ragged prefill stage inputs. Captured from Llama-3.1-8B model.",
+  "description": "Batch Grouped Query Attention (GQA) with ragged input for prefill stage. Captured from Llama-3.1-8B model.",
   "type": "gqa",
   "tags": [
     "stage:prefill",
