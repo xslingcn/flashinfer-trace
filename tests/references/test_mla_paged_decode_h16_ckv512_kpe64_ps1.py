@@ -6,11 +6,12 @@ import torch
 
 
 @torch.no_grad()
-def run(q_nope, q_pe, ckv_cache, kpe_cache, kv_indptr, kv_indices, kv_len_arr, sm_scale):
+def run(q_nope, q_pe, ckv_cache, kpe_cache, kv_indptr, kv_indices, sm_scale):
     batch_size, num_qo_heads, head_dim_ckv = q_nope.shape
     head_dim_kpe = q_pe.shape[-1]
     page_size = ckv_cache.shape[1]
-    num_indptr = kv_indptr.shape[0]
+    len_kv_indptr = kv_indptr.shape[0]
+    num_kv_indices = kv_indices.shape[0]
 
     # Check constants
     assert num_qo_heads == 16
@@ -19,7 +20,8 @@ def run(q_nope, q_pe, ckv_cache, kpe_cache, kv_indptr, kv_indices, kv_len_arr, s
     assert page_size == 1
 
     # Check constraints
-    assert num_indptr == batch_size + 1
+    assert len_kv_indptr == batch_size + 1
+    assert num_kv_indices == kv_indptr[-1].item()
 
     device = q_nope.device
 
@@ -41,14 +43,14 @@ def run(q_nope, q_pe, ckv_cache, kpe_cache, kv_indptr, kv_indices, kv_len_arr, s
             continue
 
         pages = kv_indices[page_beg:page_end]
-        L_tokens = int(kv_len_arr[b].item())
+        # Derive kv_len from kv_indptr (for page_size=1, num_pages == num_tokens)
+        L_tokens = page_end - page_beg
 
         if L_tokens <= 0 or pages.numel() == 0:
             output[b].zero_()
             continue
 
         # Pages are token indices for page_size=1
-        # We only need the first L_tokens
         tok_idx = pages[:L_tokens].to(torch.long)
 
         Kc = Kc_all[tok_idx]  # [L_tokens, head_dim_ckv]
@@ -166,7 +168,6 @@ def test_correctness(batch_size=4, max_seq_len=64, atol=1e-2, rtol=5e-2):
         inputs["kpe_cache"],
         inputs["kv_indptr"],
         inputs["kv_indices"],
-        inputs["kv_len_arr"],
         inputs["sm_scale"],
     )
     ref_o = ref_output["output"]
