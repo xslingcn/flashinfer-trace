@@ -5,7 +5,7 @@ import torch
 
 
 @torch.no_grad()
-def run(q, k, v, seq_indptr, sm_scale, causal):
+def run(q, k, v, seq_indptr, sm_scale):
     total_tokens, num_qo_heads, head_dim_qk = q.shape
     head_dim_vo = v.shape[-1]
     len_indptr = seq_indptr.shape[0]
@@ -42,10 +42,9 @@ def run(q, k, v, seq_indptr, sm_scale, causal):
         logits_scaled = logits * sm_scale
 
         # Apply causal mask if enabled
-        if causal:
-            i = torch.arange(seq_len, device=device).unsqueeze(-1)  # [seq_len, 1]
-            j = torch.arange(seq_len, device=device).unsqueeze(0)  # [1, seq_len]
-            logits_scaled.masked_fill_((j > i).unsqueeze(1), float("-inf"))
+        i = torch.arange(seq_len, device=device).unsqueeze(-1)  # [seq_len, 1]
+        j = torch.arange(seq_len, device=device).unsqueeze(0)  # [1, seq_len]
+        logits_scaled.masked_fill_((j > i).unsqueeze(1), float("-inf"))
 
         # Compute 2-base LSE
         lse[seq_start:seq_end] = torch.logsumexp(logits_scaled, dim=-1) / math.log(2.0)
@@ -132,7 +131,6 @@ def test_correctness(batch_size=4, max_seq_len=32, causal=True, atol=1e-2, rtol=
         inputs["v"],
         inputs["seq_indptr"],
         inputs["sm_scale"],
-        inputs["causal"],
     )
     ref_o = ref["output"]
     ref_lse = ref["lse"]
@@ -236,13 +234,13 @@ def main():
     test_cfgs = [
         # (batch_size, max_seq_len, causal)
         (1, 16, True),   # Small, causal
-        (1, 16, False),  # Small, non-causal
+        # (1, 16, False),  # Small, non-causal
         (4, 32, True),   # Medium, causal
-        (4, 32, False),  # Medium, non-causal
+        # (4, 32, False),  # Medium, non-causal
         (8, 64, True),   # Large, causal
-        (8, 64, False),  # Large, non-causal
+        # (8, 64, False),  # Large, non-causal
         (16, 128, True),  # Very large, causal
-        (16, 128, False), # Very large, non-causal
+        # (16, 128, False), # Very large, non-causal
     ]
     passed = 0
     for bs, max_seq, causal in test_cfgs:

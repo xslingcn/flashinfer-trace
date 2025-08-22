@@ -6,7 +6,7 @@ import torch
 
 
 @torch.no_grad()
-def run(q_nope, q_pe, ckv_cache, kpe_cache, qo_indptr, kv_indptr, kv_indices, sm_scale, causal):
+def run(q_nope, q_pe, ckv_cache, kpe_cache, qo_indptr, kv_indptr, kv_indices, sm_scale):
     total_q, num_qo_heads, head_dim_ckv = q_nope.shape
     head_dim_kpe = q_pe.shape[-1]
     page_size = ckv_cache.shape[1]
@@ -67,13 +67,12 @@ def run(q_nope, q_pe, ckv_cache, kpe_cache, qo_indptr, kv_indptr, kv_indices, sm
             logits = (qn @ Kc.T) + (qp @ Kp.T)  # [num_heads, kv_len]
             logits_scaled = logits * sm_scale
 
-            # Apply causal mask if enabled
-            if causal:
-                prefix_len = kv_len - q_len  # Number of previously cached tokens
-                query_abs_pos = prefix_len + i  # Absolute position of current query
-                
-                causal_mask = torch.arange(kv_len, device=logits_scaled.device) > query_abs_pos
-                logits_scaled.masked_fill_(causal_mask.unsqueeze(0), -float("inf"))
+            # Apply causal mask
+            prefix_len = kv_len - q_len  # Number of previously cached tokens
+            query_abs_pos = prefix_len + i  # Absolute position of current query
+            
+            causal_mask = torch.arange(kv_len, device=logits_scaled.device) > query_abs_pos
+            logits_scaled.masked_fill_(causal_mask.unsqueeze(0), -float("inf"))
 
             # Compute 2-base LSE
             lse[q_start + i] = torch.logsumexp(logits_scaled, dim=-1) / math.log(2.0)
@@ -211,7 +210,6 @@ def test_correctness(batch_size=4, max_q_len=32, max_kv_len=64, causal=True, ato
         inputs["kv_indptr"],
         inputs["kv_indices"],
         inputs["sm_scale"],
-        inputs["causal"],
     )
     ref_o = ref_output["output"]
     ref_lse = ref_output["lse"]
@@ -285,7 +283,7 @@ def test_correctness(batch_size=4, max_q_len=32, max_kv_len=64, causal=True, ato
             for i in range(top_k):
                 idx = top_indices[i].item()
                 # Convert flat index back to 3D indices
-                total_q, num_qo_heads, head_dim_ckv = ref_o.shape
+                _, num_qo_heads, head_dim_ckv = ref_o.shape
                 batch_idx = idx // (num_qo_heads * head_dim_ckv)
                 head_idx = (idx % (num_qo_heads * head_dim_ckv)) // head_dim_ckv
                 dim_idx = idx % head_dim_ckv
@@ -307,7 +305,7 @@ def test_correctness(batch_size=4, max_q_len=32, max_kv_len=64, causal=True, ato
             print(f"\nTop {top_k} LSE error locations:")
             for i in range(top_k):
                 idx = top_lse_indices[i].item()
-                total_q, num_qo_heads = ref_lse.shape
+                _, num_qo_heads = ref_lse.shape
                 batch_idx = idx // num_qo_heads
                 head_idx = idx % num_qo_heads
 
@@ -330,11 +328,11 @@ def main():
     test_configs = [
         # (batch_size, max_q_len, max_kv_len, causal)
         (1, 8, 16, True),   # Small causal
-        (1, 8, 16, False),  # Small non-causal
+        # (1, 8, 16, False),  # Small non-causal
         (4, 16, 32, True),  # Medium causal
-        (4, 16, 32, False), # Medium non-causal
+        # (4, 16, 32, False), # Medium non-causal
         (8, 32, 64, True),  # Large causal
-        (8, 32, 64, False), # Large non-causal
+        # (8, 32, 64, False), # Large non-causal
     ]
 
     passed = 0

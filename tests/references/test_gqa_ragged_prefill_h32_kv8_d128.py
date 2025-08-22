@@ -5,7 +5,7 @@ import torch
 
 
 @torch.no_grad()
-def run(q, k, v, qo_indptr, kv_indptr, sm_scale, causal):
+def run(q, k, v, qo_indptr, kv_indptr, sm_scale):
     total_q, num_qo_heads, head_dim = q.shape
     total_kv, num_kv_heads, _ = k.shape
     len_indptr = qo_indptr.shape[0]
@@ -57,12 +57,8 @@ def run(q, k, v, qo_indptr, kv_indptr, sm_scale, causal):
         for q_idx in range(num_q_tokens):
             global_q_idx = q_start + q_idx
 
-            # Apply causal mask if enabled, otherwise attend to all KV tokens
-            if causal:
-                max_kv_idx = min(q_idx + 1 + delta, num_kv_tokens)
-            else:
-                max_kv_idx = num_kv_tokens
-
+            # Apply causal mask
+            max_kv_idx = min(q_idx + 1 + delta, num_kv_tokens)
             if max_kv_idx <= 0:
                 continue
 
@@ -194,7 +190,6 @@ def test_correctness(batch_size=4, max_q_len=32, max_kv_len=64, causal=True, ato
         inputs["qo_indptr"],
         inputs["kv_indptr"],
         inputs["sm_scale"],
-        inputs["causal"],
     )
     ref_o = ref_output["output"]
     ref_lse = ref_output["lse"]
@@ -333,15 +328,15 @@ def main():
     test_configs = [
         # (batch_size, max_q_len, max_kv_len, causal)
         (1, 8, 16, True),  # Single batch, small, causal
-        (1, 8, 16, False),  # Single batch, small, non-causal
+        # (1, 8, 16, False),  # Single batch, small, non-causal
         (4, 16, 32, True),  # Small batch, causal
-        (4, 16, 32, False),  # Small batch, non-causal
+        # (4, 16, 32, False),  # Small batch, non-causal
         (8, 32, 64, True),  # Medium batch, causal
-        (8, 32, 64, False),  # Medium batch, non-causal
+        # (8, 32, 64, False),  # Medium batch, non-causal
         (16, 64, 128, True),  # Large batch, causal
-        (16, 64, 128, False),  # Large batch, non-causal
+        # (16, 64, 128, False),  # Large batch, non-causal
         (32, 128, 256, True),  # Very large batch, causal
-        (32, 128, 256, False),  # Very large batch, non-causal
+        # (32, 128, 256, False),  # Very large batch, non-causal
     ]
 
     passed = 0

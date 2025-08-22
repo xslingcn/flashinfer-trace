@@ -1,6 +1,6 @@
 {
-  "name": "mla_ragged_prefill_h16_qk192_vo128",
-  "description": "Multi-head Latent Attention (MLA) with ragged input for prefill stage. Captured from DeepSeek-V3 models during total prefill with tensor parallel size 8.",
+  "name": "mla_ragged_prefill_causal_h16_qk192_vo128",
+  "description": "Multi-head Latent Attention (MLA) with ragged input for prefill stage. Causal mask is applied. Captured from DeepSeek-V3 models during total prefill with tensor parallel size 8.",
   "type": "mla",
   "tags": [
     "stage:prefill",
@@ -69,11 +69,6 @@
       "shape": [],
       "dtype": "float32",
       "description": "Softmax scale. Default is (1/sqrt(head_dim))."
-    },
-    "causal": {
-      "shape": [],
-      "dtype": "bool",
-      "description": "Enable causal masking."
     }
   },
   "outputs": {
@@ -94,5 +89,5 @@
       "description": "The 2-based log-sum-exp of attention logits."
     }
   },
-  "reference": "import torch\nimport math\n\n\n@torch.no_grad()\ndef run(q, k, v, seq_indptr, sm_scale, causal):\n    total_tokens, num_qo_heads, head_dim_qk = q.shape\n    head_dim_vo = v.shape[-1]\n    len_indptr = seq_indptr.shape[0]\n\n    # Check constants\n    assert num_qo_heads == 16\n    assert head_dim_qk == 192\n    assert head_dim_vo == 128\n\n    # Check constraints\n    assert total_tokens == seq_indptr[-1].item()\n\n    device = q.device\n\n    out = torch.zeros((total_tokens, num_qo_heads, head_dim_vo), dtype=torch.bfloat16, device=device)\n    lse = torch.full((total_tokens, num_qo_heads), -float(\"inf\"), dtype=torch.float32, device=device)\n\n    q = q.to(torch.float32)\n    k = k.to(torch.float32)\n    v = v.to(torch.float32)\n\n    for b in range(len_indptr - 1):\n        seq_start = int(seq_indptr[b].item())\n        seq_end = int(seq_indptr[b + 1].item())\n        if seq_start >= seq_end:\n            continue\n\n        seq_len = seq_end - seq_start\n        qb = q[seq_start:seq_end]  # [seq_len, num_qo_heads, head_dim_qk]\n        kb = k[seq_start:seq_end]  # [seq_len, num_qo_heads, head_dim_qk]\n        vb = v[seq_start:seq_end]  # [seq_len, num_qo_heads, head_dim_vo]\n\n        logits = torch.einsum(\"qhd,khd->qhk\", qb, kb)  # [seq_len, num_qo_heads, seq_len]\n        logits_scaled = logits * sm_scale\n\n        # Apply causal mask if enabled\n        if causal:\n            i = torch.arange(seq_len, device=device).unsqueeze(-1)  # [seq_len, 1]\n            j = torch.arange(seq_len, device=device).unsqueeze(0)  # [1, seq_len]\n            logits_scaled.masked_fill_((j > i).unsqueeze(1), float(\"-inf\"))\n\n        # Compute 2-base LSE\n        lse[seq_start:seq_end] = torch.logsumexp(logits_scaled, dim=-1) / math.log(2.0)\n\n        attn = torch.softmax(logits_scaled, dim=-1)  # [seq_len, num_qo_heads, seq_len]\n        out_b = torch.einsum(\"qhk,khd->qhd\", attn, vb)  # [seq_len, num_qo_heads, head_dim_vo]\n        out[seq_start:seq_end] = out_b.to(torch.bfloat16)\n\n    return {\"output\": out, \"lse\": lse}"
+  "reference": "import torch\nimport math\n\n\n@torch.no_grad()\ndef run(q, k, v, seq_indptr, sm_scale):\n    total_tokens, num_qo_heads, head_dim_qk = q.shape\n    head_dim_vo = v.shape[-1]\n    len_indptr = seq_indptr.shape[0]\n\n    # Check constants\n    assert num_qo_heads == 16\n    assert head_dim_qk == 192\n    assert head_dim_vo == 128\n\n    # Check constraints\n    assert total_tokens == seq_indptr[-1].item()\n\n    device = q.device\n\n    out = torch.zeros((total_tokens, num_qo_heads, head_dim_vo), dtype=torch.bfloat16, device=device)\n    lse = torch.full((total_tokens, num_qo_heads), -float(\"inf\"), dtype=torch.float32, device=device)\n\n    q = q.to(torch.float32)\n    k = k.to(torch.float32)\n    v = v.to(torch.float32)\n\n    for b in range(len_indptr - 1):\n        seq_start = int(seq_indptr[b].item())\n        seq_end = int(seq_indptr[b + 1].item())\n        if seq_start >= seq_end:\n            continue\n\n        seq_len = seq_end - seq_start\n        qb = q[seq_start:seq_end]  # [seq_len, num_qo_heads, head_dim_qk]\n        kb = k[seq_start:seq_end]  # [seq_len, num_qo_heads, head_dim_qk]\n        vb = v[seq_start:seq_end]  # [seq_len, num_qo_heads, head_dim_vo]\n\n        logits = torch.einsum(\"qhd,khd->qhk\", qb, kb)  # [seq_len, num_qo_heads, seq_len]\n        logits_scaled = logits * sm_scale\n\n        # Apply causal mask\n        i = torch.arange(seq_len, device=device).unsqueeze(-1)  # [seq_len, 1]\n        j = torch.arange(seq_len, device=device).unsqueeze(0)  # [1, seq_len]\n        logits_scaled.masked_fill_((j > i).unsqueeze(1), float(\"-inf\"))\n\n        # Compute 2-base LSE\n        lse[seq_start:seq_end] = torch.logsumexp(logits_scaled, dim=-1) / math.log(2.0)\n\n        attn = torch.softmax(logits_scaled, dim=-1)  # [seq_len, num_qo_heads, seq_len]\n        out_b = torch.einsum(\"qhk,khd->qhd\", attn, vb)  # [seq_len, num_qo_heads, head_dim_vo]\n        out[seq_start:seq_end] = out_b.to(torch.bfloat16)\n\n    return {\"output\": out, \"lse\": lse}"
 }
